@@ -179,4 +179,22 @@ app.get('/',requireAuth,(req,res)=>{
 app.get('/about',(_req,res)=>res.send(`<h1>${APP_NAME} About</h1>`));
 
 // --- start ---
+// --- DEBUG: list users + password reset page (enabled only when RESET_TOKEN is set) ---
+app.get('/debug-users', async (req, res) => {
+  if (!process.env.RESET_TOKEN) return res.status(404).send('Not enabled');
+  const users = await dbAll(`SELECT id,email,role FROM users`);
+  res.json(users);
+});
+
+app.get('/reset-password', (req, res) => {
+  if (!process.env.RESET_TOKEN) return res.status(404).send('Not enabled');
+  res.send(`<h1>Password Reset</h1>
+    <form method="POST">
+      <input name=email placeholder="email" required>
+      <input name=password type=password placeholder="new password" minlength="6" required>
+      <input name=token placeholder="RESET_TOKEN" required>
+      <button>Reset</button>
+    </form>`);
+});
 ensureSchema().then(()=>app.listen(PORT,()=>console.log(`${APP_NAME} at http://localhost:${PORT}`)));
+
