@@ -4,7 +4,11 @@
   "description": "TradeX — personal trade journal with calendar PnL, CSV import, and summaries.",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "postinstall": "npm rebuild sqlite3 --build-from-source"
+  },
+  "engines": {
+    "node": "20.x"
   },
   "keywords": ["trading", "journal", "pnl", "calendar", "csv"],
   "author": "Reyes",
