@@ -196,5 +196,33 @@ app.get('/reset-password', (req, res) => {
       <button>Reset</button>
     </form>`);
 });
+// --- TEMP: bootstrap a new admin (enabled only when RESET_TOKEN is set) ---
+app.get('/bootstrap-admin', (req, res) => {
+  if (!process.env.RESET_TOKEN) return res.status(404).send('Not enabled');
+  res.send(`<h1>Create Admin</h1>
+    <form method="POST" action="/bootstrap-admin" style="display:grid;gap:8px;max-width:360px;">
+      <input name="email" type="email" placeholder="email" required>
+      <input name="password" type="password" placeholder="password (min 6)" minlength="6" required>
+      <input name="token" placeholder="RESET_TOKEN" required>
+      <button>Create Admin</button>
+    </form>`);
+});
+
+app.post('/bootstrap-admin', async (req,res)=>{
+  try{
+    if (!process.env.RESET_TOKEN || req.body.token !== process.env.RESET_TOKEN) {
+      return res.status(403).send('Bad token');
+    }
+    const email = String(req.body.email||'').trim().toLowerCase();
+    const pass  = String(req.body.password||'');
+    if (pass.length < 6) return res.status(400).send('Password too short');
+    const hash = await bcrypt.hash(pass,10);
+    await dbRun(`INSERT INTO users(email,password_hash,role) VALUES(?,?, 'admin')`, [email, hash]);
+    res.send('Admin created. <a href="/login">Log in</a>');
+  }catch(e){
+    console.error(e);
+    res.status(500).send('Bootstrap error');
+  }
+});
 ensureSchema().then(()=>app.listen(PORT,()=>console.log(`${APP_NAME} at http://localhost:${PORT}`)));
 
