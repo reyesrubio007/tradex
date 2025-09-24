@@ -1,14 +1,11 @@
 {
   "name": "tradeX",
-  "version": "0.5.0",
+  "version": "0.8.0",
   "description": "TradeX — multi-user trade journal with calendar PnL, CSV import, summaries, and login.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "postinstall": "npm rebuild sqlite3 --build-from-source"
-  },
-  "engines": {
-    "node": "20.x"
   },
   "keywords": [
     "trading",
@@ -16,14 +13,17 @@
     "pnl",
     "calendar",
     "csv",
-    "login",
-    "multi-user"
+    "express",
+    "sqlite"
   ],
   "author": "Reyes",
   "license": "ISC",
+  "engines": {
+    "node": "20.x"
+  },
   "dependencies": {
     "bcryptjs": "^2.4.3",
-    "connect-sqlite3": "^0.9.16",
+    "connect-sqlite3": "^7.1.0",
     "csv-parse": "^6.1.0",
     "express": "^5.1.0",
     "express-session": "^1.17.3",
