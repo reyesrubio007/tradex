@@ -1,11 +1,11 @@
 
-// TradeX v1.0.0 — full app
+// TradeX v1.1.0 — full app with API and dashboard token card
 // ENV (Render):
 //  DB_PATH=/var/data/journal.db
 //  SESSIONS_DIR=/var/data
 //  SESSION_SECRET=<long_random>
 //  RESET_TOKEN=<set temporarily only when needed, then remove>
-//  Node: package.json "engines": { "node": "20.x" }
+// package.json should include: "engines": { "node": "20.x" }
 
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
@@ -16,19 +16,18 @@ const { parse } = require('csv-parse');
 const session = require('express-session');
 const SQLiteStore = require('connect-sqlite3')(session);
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const APP_NAME = 'TradeX';
 
-// ✅ Important for Render secure cookies behind proxy
-app.set('trust proxy', 1);
+app.set('trust proxy', 1); // needed for secure cookies on Render
 
-// ---- Body parsing ----
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// ---- DB ----
+// --- DB ---
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'journal.db');
 const db = new sqlite3.Database(DB_PATH);
 const dbAll = (sql, p = []) => new Promise((res, rej) => db.all(sql, p, (e, r) => e ? rej(e) : res(r)));
@@ -41,6 +40,7 @@ async function ensureSchema() {
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     role TEXT NOT NULL CHECK(role IN ('admin','user')) DEFAULT 'admin',
+    api_token TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
 
@@ -56,9 +56,17 @@ async function ensureSchema() {
     notes TEXT,
     user_id INTEGER
   )`);
+
+  // lightweight migration tracker example
+  await dbRun(`CREATE TABLE IF NOT EXISTS __migrations (k TEXT PRIMARY KEY)`);
+  const m = await dbGet(`SELECT k FROM __migrations WHERE k='users.api_token'`);
+  if (!m) {
+    try { await dbRun(`ALTER TABLE users ADD COLUMN api_token TEXT`); } catch {}
+    await dbRun(`INSERT OR IGNORE INTO __migrations(k) VALUES('users.api_token')`);
+  }
 }
 
-// ---- Sessions (SQLite) ----
+// --- Sessions ---
 const SESSION_SECRET = process.env.SESSION_SECRET || 'dev_secret_change_me';
 const sessionsDir = process.env.SESSIONS_DIR || path.dirname(DB_PATH);
 app.use(session({
@@ -70,12 +78,12 @@ app.use(session({
   cookie: {
     httpOnly: true,
     sameSite: 'lax',
-    secure: !!process.env.RENDER,   // true on Render (HTTPS)
-    maxAge: 1000 * 60 * 60 * 24 * 7 // 7 days
+    secure: !!process.env.RENDER,
+    maxAge: 1000 * 60 * 60 * 24 * 7
   }
 }));
 
-// ---- Helpers ----
+// --- Helpers ---
 const esc = s => String(s || '')
   .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
   .replace(/\\"/g,'&quot;').replace(/'/g,'&#039;');
@@ -109,7 +117,9 @@ function isoWeekKey(s) {
   return `${wy}-W${String(w).padStart(2, '0')}`;
 }
 
-// ---- Guards ----
+function newApiToken() { return crypto.randomBytes(24).toString('hex'); }
+
+// Guards
 function requireAuth(req, res, next) {
   if (req.session?.user) return next();
   return res.redirect('/login');
@@ -119,7 +129,23 @@ function requireAdmin(req, res, next) {
   return res.status(403).send('Admins only');
 }
 
-// ---- Modern Login ----
+// --- API auth middleware ---
+async function apiAuth(req, res, next) {
+  try {
+    const hdr = String(req.headers.authorization || '');
+    const m = hdr.match(/^Bearer\s+([A-Za-z0-9]+)$/i) || hdr.match(/^Bearer\s+([a-f0-9]{48})$/i);
+    const token = m ? m[1] : null;
+    if (!token) return res.status(401).json({ error: 'Missing or bad Authorization header' });
+    const u = await dbGet(`SELECT id,email,role FROM users WHERE api_token=?`, [token]);
+    if (!u) return res.status(401).json({ error: 'Invalid token' });
+    req.apiUser = u;
+    next();
+  } catch (e) {
+    res.status(500).json({ error: 'Auth error' });
+  }
+}
+
+// --- Auth Screens ---
 app.get('/login', async (req, res) => {
   const c = await dbGet(`SELECT COUNT(*) AS c FROM users`);
   const canSignup = (c && c.c === 0);
@@ -173,7 +199,6 @@ app.post('/login', async (req, res) => {
   }
 });
 
-// ---- Modern Signup (first admin only) ----
 app.get('/signup', async (req, res) => {
   const c = await dbGet(`SELECT COUNT(*) AS c FROM users`);
   if (!c || c.c !== 0) return res.redirect('/login');
@@ -233,7 +258,7 @@ app.post('/admin/users', requireAuth, requireAdmin, async (req, res) => {
     const hash = await bcrypt.hash(pass, 10);
     await dbRun(`INSERT INTO users(email,password_hash,role) VALUES(?,?,?)`, [email, hash, role]);
     res.redirect('/admin/users');
-  } catch (e) {
+  } catch {
     res.redirect('/admin/users');
   }
 });
@@ -247,7 +272,7 @@ app.post('/admin/users/:id/delete', requireAuth, requireAdmin, async (req, res) 
     if (victim && victim.role === 'admin' && admins && admins.c <= 1) return res.redirect('/admin/users'); // keep at least 1 admin
     await dbRun(`DELETE FROM users WHERE id=?`, [id]);
     res.redirect('/admin/users');
-  } catch (e) {
+  } catch {
     res.redirect('/admin/users');
   }
 });
@@ -327,15 +352,24 @@ app.post('/trades/:id/delete', requireAuth, async (req, res) => {
     const id = parseInt(req.params.id, 10);
     await dbRun(`DELETE FROM trades WHERE id=? AND user_id=?`, [id, uid]);
     res.redirect('/');
-  } catch (e) {
+  } catch {
     res.status(400).send('Bad request');
   }
 });
 
-// ---- Dashboard (Modern UI) ----
+// ---- Dashboard (Modern UI with API token card) ----
 app.get('/', requireAuth, async (req, res) => {
   try {
     const uid = req.session.user.id;
+
+    // Ensure this user has an API token
+    let u = await dbGet(`SELECT email, role, api_token FROM users WHERE id=?`, [uid]);
+    if (!u.api_token) {
+      const tok = newApiToken();
+      await dbRun(`UPDATE users SET api_token=? WHERE id=?`, [tok, uid]);
+      u = await dbGet(`SELECT email, role, api_token FROM users WHERE id=?`, [uid]);
+    }
+
     const now = new Date();
     const year = parseInt(req.query.y || now.getUTCFullYear(), 10);
     const monthIdx = parseInt(req.query.m || (now.getUTCMonth() + 1), 10) - 1;
@@ -410,6 +444,9 @@ app.get('/', requireAuth, async (req, res) => {
       </div>`;
     };
 
+    // API token card HTML
+    const apiCurl = `curl -H "Authorization: Bearer ${u.api_token}" ${req.protocol}://${req.get('host')}/api/health`;
+
     res.send(`<!doctype html>
 <html><head>
   <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
@@ -423,11 +460,11 @@ app.get('/', requireAuth, async (req, res) => {
         <div class="h-9 w-9 grid place-items-center rounded-xl bg-slate-900 text-white font-bold">T</div>
         <div>
           <h1 class="text-2xl md:text-3xl font-bold">${APP_NAME}</h1>
-          <p class="text-xs text-slate-500">Welcome, ${esc(req.session.user.email)}</p>
+          <p class="text-xs text-slate-500">Welcome, ${esc(u.email)}</p>
         </div>
       </div>
       <nav class="flex items-center gap-3 text-sm">
-        ${req.session.user.role === 'admin' ? `<a class="underline" href="/admin/users">Users</a>` : ``}
+        ${u.role === 'admin' ? `<a class="underline" href="/admin/users">Users</a>` : ``}
         <a class="underline" href="/about">About</a>
         <form method="POST" action="/logout"><button class="underline text-rose-700">Logout</button></form>
       </nav>
@@ -463,7 +500,8 @@ app.get('/', requireAuth, async (req, res) => {
       </div>
     </section>
 
-    <section class="grid md:grid-cols-2 gap-6">
+    <section class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+      <!-- Add Trade -->
       <div class="bg-white rounded-2xl shadow p-5">
         <h2 class="text-xl font-semibold mb-3">Add Trade</h2>
         <form method="POST" action="/trades" class="grid grid-cols-2 gap-3">
@@ -505,39 +543,36 @@ app.get('/', requireAuth, async (req, res) => {
         </form>
       </div>
 
+      <!-- Import CSV -->
       <div class="bg-white rounded-2xl shadow p-5">
-        <h2 class="text-xl font-semibold mb-3">Daily PnL</h2>
-        <div class="overflow-x-auto">
-          <table class="min-w-full text-sm">
-            <thead><tr class="text-left border-b"><th class="py-2 pr-4">Date</th><th class="py-2">Total</th></tr></thead>
-            <tbody>
-              ${dailySorted.length ? dailySorted.map(d => `
-                <tr class="border-b last:border-b-0">
-                  <td class="py-2 pr-4">${d.date}</td>
-                  <td class="py-2 font-mono ${d.total >= 0 ? 'text-emerald-600' : 'text-rose-600'}">${d.total.toFixed(2)}</td>
-                </tr>
-              `).join('') : `<tr><td class="py-2" colspan="2">No data yet.</td></tr>`}
-            </tbody>
-          </table>
+        <h2 class="text-xl font-semibold mb-3">Import CSV</h2>
+        <form method="POST" action="/import" enctype="multipart/form-data" class="space-y-3">
+          <input type="file" name="csvfile" accept=".csv" required class="block w-full text-sm text-slate-700 border border-slate-200 rounded-xl p-2">
+          <button class="px-4 py-2 rounded-xl shadow bg-slate-900 text-white hover:opacity-90">Upload</button>
+        </form>
+        <p class="mt-2 text-xs text-slate-500">CSV headers: <code>trade_date,symbol,side,qty,entry_price,exit_price,fees,notes</code></p>
+      </div>
+
+      <!-- API Access card -->
+      <div class="bg-white rounded-2xl shadow p-5">
+        <h2 class="text-xl font-semibold mb-3">API Access</h2>
+        <p class="text-sm text-slate-600 mb-2">Use this token in the <code>Authorization</code> header as <code>Bearer &lt;token&gt;</code>.</p>
+        <div class="flex items-center gap-2">
+          <input id="apiTok" readonly value="${u.api_token}" class="flex-1 border rounded-xl p-2 text-sm font-mono bg-slate-50">
+          <button id="copyBtn" class="px-3 py-2 rounded-xl border">Copy</button>
+        </div>
+        <form method="POST" action="/api-key/regenerate" onsubmit="return confirm('Regenerate key? Old key will stop working.');">
+          <button class="mt-3 px-4 py-2 rounded-xl bg-slate-900 text-white">Regenerate</button>
+        </form>
+        <div class="mt-3 text-xs text-slate-500">
+          Quick test:
+          <pre class="p-2 bg-slate-100 rounded overflow-x-auto">${apiCurl}</pre>
         </div>
       </div>
     </section>
 
     <section class="bg-white rounded-2xl shadow p-5">
       <h2 class="text-xl font-semibold mb-3">Trades</h2>
-<div class="bg-white rounded-2xl shadow p-5">
-  <h2 class="text-xl font-semibold mb-3">Import CSV</h2>
-  <form method="POST" action="/import" enctype="multipart/form-data" class="space-y-3">
-    <input type="file" name="csvfile" accept=".csv" required 
-           class="block w-full text-sm text-slate-700 border border-slate-200 rounded-xl p-2">
-    <button class="px-4 py-2 rounded-xl shadow bg-slate-900 text-white hover:opacity-90">
-      Upload
-    </button>
-  </form>
-  <p class="mt-2 text-xs text-slate-500">
-    CSV must include: <code>trade_date,symbol,side,qty,entry_price,exit_price,fees,notes</code>
-  </p>
-</div>
       <div class="overflow-x-auto">
         <table class="min-w-full text-sm">
           <thead>
@@ -578,8 +613,20 @@ app.get('/', requireAuth, async (req, res) => {
       </div>
     </section>
 
-    <footer class="text-xs text-slate-500 text-center py-6">${APP_NAME} • v1.0.0</footer>
+    <footer class="text-xs text-slate-500 text-center py-6">${APP_NAME} • v1.1.0</footer>
   </div>
+
+  <script>
+    const btn = document.getElementById('copyBtn');
+    const inp = document.getElementById('apiTok');
+    if (btn && inp) {
+      btn.addEventListener('click', async (e)=>{
+        e.preventDefault();
+        inp.select(); inp.setSelectionRange(0, 99999);
+        try { await navigator.clipboard.writeText(inp.value); btn.textContent = 'Copied!'; setTimeout(()=>btn.textContent='Copy', 1200); } catch {}
+      });
+    }
+  </script>
 </body></html>`);
   } catch (err) {
     console.error(err);
@@ -589,10 +636,10 @@ app.get('/', requireAuth, async (req, res) => {
 
 // ---- About ----
 app.get('/about', (_req, res) => {
-  res.send(`<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><script src="https://cdn.tailwindcss.com"></script><title>${APP_NAME} • About</title></head><body class="bg-slate-50 text-slate-900"><div class="max-w-3xl mx-auto p-6 space-y-4"><a href="/" class="underline text-sm">&larr; Back</a><h1 class="text-3xl font-bold">${APP_NAME}</h1><p class="text-slate-600">Multi-user trade journal with Calendar PnL, CSV import, summaries, and login.</p><p class="text-xs text-slate-500">© ${new Date().getFullYear()} Reyes</p></div></body></html>`);
+  res.send(`<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><script src="https://cdn.tailwindcss.com"></script><title>${APP_NAME} • About</title></head><body class="bg-slate-50 text-slate-900"><div class="max-w-3xl mx-auto p-6 space-y-4"><a href="/" class="underline text-sm">&larr; Back</a><h1 class="text-3xl font-bold">${APP_NAME}</h1><p class="text-slate-600">Multi-user trade journal with Calendar PnL, CSV import, summaries, login, and token-based API.</p><p class="text-xs text-slate-500">© ${new Date().getFullYear()} Reyes</p></div></body></html>`);
 });
 
-// ---- Reset password (token-guarded) ----
+// ---- Password reset (token-guarded) ----
 app.get('/reset-password', (req, res) => {
   if (!process.env.RESET_TOKEN) return res.status(404).send('Not enabled');
   res.send(`<h1>Password Reset</h1><form method="POST"><input name="email" placeholder="email"><input name="password" type="password" minlength="6" placeholder="new password"><input name="token" placeholder="RESET_TOKEN"><button>Reset</button></form>`);
@@ -609,7 +656,7 @@ app.post('/reset-password', async (req, res) => {
     const r = await dbRun(`UPDATE users SET password_hash=? WHERE email=?`, [hash, email]);
     if (!r.changes) return res.status(404).send('User not found');
     res.send('Password updated. <a href="/login">Go to login</a>');
-  } catch (e) {
+  } catch {
     res.status(500).send('Reset error');
   }
 });
@@ -651,6 +698,138 @@ app.get('/_diag', async (req, res) => {
   let users = [];
   try { users = await dbAll(`SELECT id,email,role FROM users ORDER BY id`); } catch {}
   res.type('html').send(`<pre>${JSON.stringify({ env, users }, null, 2)}</pre>`);
+});
+
+// ---- API ROUTES ----
+
+// Quick UI page for key (optional)
+app.get('/api-key', requireAuth, async (req, res) => {
+  let u = await dbGet(`SELECT api_token FROM users WHERE id=?`, [req.session.user.id]);
+  if (!u?.api_token) {
+    const tok = newApiToken();
+    await dbRun(`UPDATE users SET api_token=? WHERE id=?`, [tok, req.session.user.id]);
+    u = await dbGet(`SELECT api_token FROM users WHERE id=?`, [req.session.user.id]);
+  }
+  res.send(`<pre>${u.api_token}</pre><p>Use as: Authorization: Bearer &lt;token&gt;</p>`);
+});
+
+app.post('/api-key/regenerate', requireAuth, async (req, res) => {
+  const tok = newApiToken();
+  await dbRun(`UPDATE users SET api_token=? WHERE id=?`, [tok, req.session.user.id]);
+  res.redirect('/');
+});
+
+// Health
+app.get('/api/health', apiAuth, (req, res) => {
+  res.json({ ok: true, user: { id: req.apiUser.id, email: req.apiUser.email } });
+});
+
+// List trades (filters + pagination)
+app.get('/api/trades', apiAuth, async (req, res) => {
+  const { symbol, from, to } = req.query;
+  const limit = Math.min(parseInt(req.query.limit || '100', 10), 500);
+  const offset = Math.max(parseInt(req.query.offset || '0', 10), 0);
+  const where = ['user_id=?']; const params = [req.apiUser.id];
+  if (symbol) { where.push('symbol=?'); params.push(String(symbol).toUpperCase()); }
+  if (from)   { where.push('trade_date>=?'); params.push(String(from)); }
+  if (to)     { where.push('trade_date<=?'); params.push(String(to)); }
+  const rows = await dbAll(
+    `SELECT id,trade_date,symbol,side,qty,entry_price,exit_price,fees,notes
+     FROM trades WHERE ${where.join(' AND ')}
+     ORDER BY trade_date DESC,id DESC
+     LIMIT ? OFFSET ?`, [...params, limit, offset]
+  );
+  res.json(rows.map(r => ({ ...r, pnl: computePnl(r) })));
+});
+
+// Create trade
+app.post('/api/trades', apiAuth, async (req, res) => {
+  try {
+    const { trade_date, symbol, side, qty, entry_price, exit_price, fees = 0, notes = '' } = req.body || {};
+    if (!isValidDate(trade_date)) return res.status(400).json({ error: 'Invalid date' });
+    if (!symbol || !['LONG','SHORT'].includes(side)) return res.status(400).json({ error: 'Bad symbol/side' });
+    const qtyNum = parseInt(qty, 10);
+    const entry = toNum(entry_price);
+    const exit  = toNum(exit_price);
+    const fee   = toNum(fees, 0);
+    if (!(qtyNum > 0) || !Number.isFinite(entry) || !Number.isFinite(exit)) return res.status(400).json({ error: 'Bad numbers' });
+    const r = await dbRun(`INSERT INTO trades (trade_date,symbol,side,qty,entry_price,exit_price,fees,notes,user_id)
+                           VALUES (?,?,?,?,?,?,?,?,?)`,
+      [trade_date, symbol.trim().toUpperCase(), side, qtyNum, entry, exit, fee, notes, req.apiUser.id]);
+    const row = await dbGet(`SELECT * FROM trades WHERE id=?`, [r.lastID]);
+    res.status(201).json({ ...row, pnl: computePnl(row) });
+  } catch {
+    res.status(500).json({ error: 'Create error' });
+  }
+});
+
+// Update trade
+app.put('/api/trades/:id', apiAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const row = await dbGet(`SELECT * FROM trades WHERE id=? AND user_id=?`, [id, req.apiUser.id]);
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    const p = { ...row, ...req.body };
+    if (p.trade_date && !isValidDate(p.trade_date)) return res.status(400).json({ error: 'Invalid date' });
+    if (p.side && !['LONG','SHORT'].includes(p.side)) return res.status(400).json({ error: 'Invalid side' });
+    const qty = toNum(p.qty, row.qty);
+    const ent = toNum(p.entry_price, row.entry_price);
+    const ex  = toNum(p.exit_price, row.exit_price);
+    const fee = toNum(p.fees, row.fees);
+    await dbRun(`UPDATE trades SET trade_date=?,symbol=?,side=?,qty=?,entry_price=?,exit_price=?,fees=?,notes=? WHERE id=? AND user_id=?`,
+      [p.trade_date || row.trade_date, (p.symbol || row.symbol).toUpperCase(), p.side || row.side, qty, ent, ex, fee, p.notes ?? row.notes, id, req.apiUser.id]);
+    const updated = await dbGet(`SELECT * FROM trades WHERE id=?`, [id]);
+    res.json({ ...updated, pnl: computePnl(updated) });
+  } catch {
+    res.status(500).json({ error: 'Update error' });
+  }
+});
+
+// Delete trade
+app.delete('/api/trades/:id', apiAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const r = await dbRun(`DELETE FROM trades WHERE id=? AND user_id=?`, [id, req.apiUser.id]);
+    if (!r.changes) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ error: 'Delete error' });
+  }
+});
+
+// Daily PnL series
+app.get('/api/stats/daily', apiAuth, async (req, res) => {
+  const { from, to, symbol } = req.query;
+  const where = ['user_id=?']; const params = [req.apiUser.id];
+  if (symbol) { where.push('symbol=?'); params.push(String(symbol).toUpperCase()); }
+  if (from)   { where.push('trade_date>=?'); params.push(String(from)); }
+  if (to)     { where.push('trade_date<=?'); params.push(String(to)); }
+  const rows = await dbAll(`SELECT trade_date, symbol, side, qty, entry_price, exit_price, fees
+                            FROM trades WHERE ${where.join(' AND ')}`, params);
+  const map = new Map();
+  for (const t of rows) {
+    const pnl = computePnl(t);
+    map.set(t.trade_date, (map.get(t.trade_date) || 0) + pnl);
+  }
+  const out = Array.from(map.entries()).sort((a,b)=>a[0].localeCompare(b[0]))
+    .map(([date,total])=>({date,total}));
+  res.json(out);
+});
+
+// Summary stats
+app.get('/api/stats/summary', apiAuth, async (req, res) => {
+  const rows = await dbAll(`SELECT side, qty, entry_price, exit_price, fees
+                            FROM trades WHERE user_id=?`, [req.apiUser.id]);
+  const pnls = rows.map(computePnl);
+  const gross = pnls.reduce((a,b)=>a+b,0);
+  const wins = pnls.filter(x=>x>0).length;
+  const losses = pnls.filter(x=>x<0).length;
+  const total = pnls.length;
+  const winRate = total ? (wins/total)*100 : 0;
+  const avgWin = wins ? pnls.filter(x=>x>0).reduce((a,b)=>a+b,0)/wins : 0;
+  const avgLoss = losses ? Math.abs(pnls.filter(x=>x<0).reduce((a,b)=>a+b,0)/losses) : 0;
+  const expectancy = (winRate/100)*avgWin - (1-winRate/100)*avgLoss;
+  res.json({ totalTrades: total, grossPnL: gross, winRate, avgWin, avgLoss, expectancy });
 });
 
 // ---- Boot ----
