@@ -1,0 +1,12 @@
+# dependencies
+node_modules/
+
+# local databases
+*.db
+
+# logs and build caches
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.cache/
