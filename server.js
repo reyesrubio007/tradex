@@ -525,6 +525,19 @@ app.get('/', requireAuth, async (req, res) => {
 
     <section class="bg-white rounded-2xl shadow p-5">
       <h2 class="text-xl font-semibold mb-3">Trades</h2>
+<div class="bg-white rounded-2xl shadow p-5">
+  <h2 class="text-xl font-semibold mb-3">Import CSV</h2>
+  <form method="POST" action="/import" enctype="multipart/form-data" class="space-y-3">
+    <input type="file" name="csvfile" accept=".csv" required 
+           class="block w-full text-sm text-slate-700 border border-slate-200 rounded-xl p-2">
+    <button class="px-4 py-2 rounded-xl shadow bg-slate-900 text-white hover:opacity-90">
+      Upload
+    </button>
+  </form>
+  <p class="mt-2 text-xs text-slate-500">
+    CSV must include: <code>trade_date,symbol,side,qty,entry_price,exit_price,fees,notes</code>
+  </p>
+</div>
       <div class="overflow-x-auto">
         <table class="min-w-full text-sm">
           <thead>
